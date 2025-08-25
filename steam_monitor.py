@@ -963,13 +963,15 @@ async def setup_health_server(port: int):
 
 async def main():
     """Main execution function with proper error handling"""
+    health_runner = None
+    monitor = None
+    
     try:
         # Get configuration
         config = get_config()
         logger.info("Configuration loaded successfully")
         
         # Start health check server if needed
-        health_runner = None
         if config['port']:
             health_runner = await setup_health_server(int(config['port']))
         
@@ -1004,7 +1006,7 @@ async def main():
     finally:
         # Cleanup
         try:
-            if 'monitor' in locals():
+            if monitor:
                 await monitor.stop()
             if health_runner:
                 await health_runner.cleanup()
