@@ -185,24 +185,47 @@ class SteamMarketScraper:
     async def get_price_history(self, market_hash_name: str, days: int = 30) -> List[tuple]:
         """Get price history for an item"""
         url = f"{self.base_url}/market/pricehistory/"
+        
+        # Properly encode the market hash name
+        import urllib.parse
+        encoded_name = urllib.parse.quote(market_hash_name)
+        
         params = {
             'appid': '730',
-            'market_hash_name': market_hash_name
+            'market_hash_name': encoded_name
+        }
+        
+        # Add additional headers to appear more legitimate
+        headers = {
+            'Referer': f'{self.base_url}/market/listings/730/{encoded_name}',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json, text/plain, */*',
         }
         
         try:
-            # Add random delay to avoid rate limiting
-            await asyncio.sleep(random.uniform(1, 3))
+            # Longer delay to avoid rate limiting
+            await asyncio.sleep(random.uniform(3, 8))
             
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url, params=params, headers=headers) as response:
+                if response.status == 429:
+                    # Rate limited - wait longer
+                    logger.warning(f"Rate limited for {market_hash_name}, waiting 30 seconds...")
+                    await asyncio.sleep(30)
+                    return await self.get_price_history(market_hash_name, days)
+                
                 if response.status != 200:
-                    logger.error(f"Failed to get price history for {market_hash_name}: {response.status}")
+                    logger.warning(f"Failed to get price history for {market_hash_name}: {response.status}")
+                    # Return empty list instead of failing completely
                     return []
                 
-                data = await response.json()
+                try:
+                    data = await response.json()
+                except:
+                    logger.warning(f"Invalid JSON response for {market_hash_name}")
+                    return []
                 
                 if not data.get('success'):
-                    logger.warning(f"No price history data for {market_hash_name}")
+                    logger.info(f"No price history available for {market_hash_name}")
                     return []
                 
                 prices = data.get('prices', [])
@@ -212,22 +235,36 @@ class SteamMarketScraper:
                 cutoff_date = datetime.now() - timedelta(days=days)
                 
                 for price_entry in prices:
-                    # Format: ["Feb 01 2024 01: +0", 1.23, "45"]
-                    date_str = price_entry[0]
-                    price = float(price_entry[1])
-                    
-                    # Parse date
                     try:
-                        date_obj = datetime.strptime(date_str[:11], "%b %d %Y")
-                        if date_obj >= cutoff_date:
-                            price_history.append((date_obj, price))
+                        # Format: ["Feb 01 2024 01: +0", 1.23, "45"]
+                        if len(price_entry) >= 2:
+                            date_str = price_entry[0]
+                            price = float(price_entry[1])
+                            
+                            # Parse date - handle different formats
+                            date_obj = None
+                            try:
+                                # Try different date formats
+                                if len(date_str) >= 11:
+                                    date_obj = datetime.strptime(date_str[:11], "%b %d %Y")
+                                elif len(date_str) >= 6:
+                                    date_obj = datetime.strptime(date_str[:6], "%b %d")
+                                    date_obj = date_obj.replace(year=datetime.now().year)
+                            except:
+                                continue
+                            
+                            if date_obj and date_obj >= cutoff_date:
+                                price_history.append((date_obj, price))
                     except:
                         continue
                 
                 return sorted(price_history, key=lambda x: x[0])
                 
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting price history for {market_hash_name}")
+            return []
         except Exception as e:
-            logger.error(f"Error getting price history for {market_hash_name}: {e}")
+            logger.warning(f"Error getting price history for {market_hash_name}: {e}")
             return []
 
 class PriceAnalyzer:
@@ -428,8 +465,8 @@ class SteamPriceMonitor:
         try:
             while self.running:
                 await self.check_price_changes()
-                # Wait 30 minutes between checks to avoid rate limiting
-                await asyncio.sleep(1800)  # 30 minutes
+                # Wait 45 minutes between checks to avoid rate limiting (was 30)
+                await asyncio.sleep(2700)  # 45 minutes
                 
         except KeyboardInterrupt:
             logger.info("Received interrupt signal")
@@ -447,8 +484,8 @@ class SteamPriceMonitor:
         try:
             logger.info("Checking for price changes...")
             
-            # Get current market items
-            items = await self.scraper.get_market_items(max_items=100)
+            # Get current market items (reduced from 100 to 50 to be gentler)
+            items = await self.scraper.get_market_items(max_items=50)
             
             alerts = []
             
@@ -504,8 +541,8 @@ class SteamPriceMonitor:
                         # Save to database
                         self.db.save_item(item_data)
                     
-                    # Small delay between items
-                    await asyncio.sleep(0.5)
+                    # Longer delay between items to be more respectful
+                    await asyncio.sleep(random.uniform(2, 5))
                     
                 except Exception as e:
                     logger.error(f"Error processing item {item_data.get('name', 'unknown')}: {e}")
